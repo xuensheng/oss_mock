@@ -1,0 +1,7 @@
+[OSS]
+oss_ip=10.101.225.220
+oss_port=9011
+
+[UDF]
+#udf_name: udf_ip
+udf_list=udf_name_1: 10.101.225.220, udf_name_2: 10.101.225.221
