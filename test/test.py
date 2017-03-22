@@ -179,6 +179,53 @@ class TestOss():
         assert_true(response, response.status == 200)
         assert_equal(response, response.read(), content)
 
+    def test_get_big_normal(self):
+        self.object = RandomString(10) 
+        conn = httplib.HTTPConnection('%s:%s' % (self.oss_host, self.oss_port))
+        headers = {}
+        content = RandomString(10*1024*1024)
+        conn.request("PUT", '/' + self.object, content, headers)
+        response = conn.getresponse()
+        assert_true(response, response.status == 200)
+
+        conn.request("GET", '/' + self.object, '', headers)
+        response = conn.getresponse()
+        conn.close()
+
+        assert_true(response, response.status == 200)
+        assert_equal(response, response.read(), content)
+
+    def test_range_get(self):
+        self.object = RandomString(10) 
+        conn = httplib.HTTPConnection('%s:%s' % (self.oss_host, self.oss_port))
+        headers = {}
+        content = RandomString(1000)
+        conn.request("PUT", '/' + self.object, content, headers)
+        response = conn.getresponse()
+        assert_true(response, response.status == 200)
+
+        headers['Range'] = 'bytes=2-300'
+        conn.request("GET", '/' + self.object, '', headers)
+        response = conn.getresponse()
+        assert_true(response, response.status == 200)
+        assert_equal(response, response.getheader('content-range'), 'bytes 2-300/%d' % (len(content)))
+        assert_equal(response, response.read(), content[2:301])
+        
+        headers['Range'] = 'bytes=2-'
+        conn.request("GET", '/' + self.object, '', headers)
+        response = conn.getresponse()
+        assert_true(response, response.status == 200)
+        assert_equal(response, response.getheader('content-range'), 'bytes 2-999/%d' % (len(content)))
+        assert_equal(response, response.read(), content[2:1000])
+        
+        headers['Range'] = 'bytes=-300'
+        conn.request("GET", '/' + self.object, '', headers)
+        response = conn.getresponse()
+        assert_true(response, response.status == 200)
+        assert_equal(response, response.getheader('content-range'), 'bytes 700-999/%d' % (len(content)))
+        assert_equal(response, response.read(), content[700:1000])
+
+        conn.close()
     def test_get_object_not_exist(self):
         self.object = RandomString(10) 
         conn = httplib.HTTPConnection('%s:%s' % (self.oss_host, self.oss_port))
@@ -221,6 +268,40 @@ class TestOss():
         assert_equal(response, response.read(), 'UDF OK')
 
         conn.close()
+
+    def test_get_object_udf_normal(self):
+        self.object = RandomString(10) 
+        conn = httplib.HTTPConnection('%s:%s' % (self.oss_host, self.oss_port))
+        headers = {}
+        content = RandomString(1000)
+        conn.request("PUT", '/' + self.object, content, headers)
+        response = conn.getresponse()
+        assert_true(response, response.status == 200)
+
+        conn.request("GET", '/' + self.object + '?x-oss-process=udf/udf_name_1,k1,k2', '', headers)
+        response = conn.getresponse()
+        assert_true(response, response.status == 200)
+        assert_equal(response, response.read(), 'UDF OK')
+
+        conn.close()
+ 
+    def test_range_get_object_udf(self):
+        self.object = RandomString(10) 
+        conn = httplib.HTTPConnection('%s:%s' % (self.oss_host, self.oss_port))
+        headers = {}
+        content = RandomString(1000)
+        conn.request("PUT", '/' + self.object, content, headers)
+        response = conn.getresponse()
+        assert_true(response, response.status == 200)
+
+        headers['Range'] = 'bytes=2-300'
+        conn.request("GET", '/' + self.object + '?x-oss-process=udf/udf_name_1,k1,k2', '', headers)
+        response = conn.getresponse()
+        assert_true(response, response.status == 200)
+        assert_equal(response, response.read(), 'UDF OK')
+
+        conn.close()
+     
     def test_get_object_udf_not_exist(self):
         self.object = RandomString(10) 
         conn = httplib.HTTPConnection('%s:%s' % (self.oss_host, self.oss_port))

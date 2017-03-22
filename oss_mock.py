@@ -8,6 +8,9 @@ from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
 import simplejson as json
 import threading
 import ConfigParser
+import logging
+import logging.handlers
+import random
 
 oss_ip=''
 oss_port=''
@@ -15,6 +18,10 @@ oss_port=''
 udf_map = {}
 
 class MyHTTPRequestHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        logging.info("%s %s" % (self.address_string(),format%args))
+        return
+
     def get_local_file(self, url_path):
         m = md5.new()
         m.update(url_path)
@@ -43,7 +50,14 @@ class MyHTTPRequestHandler(BaseHTTPRequestHandler):
             return (udf_name, udf_para)
         return ('', '')
 
-    def do_udf_request(self, url_path, process_para, headers):
+    def random_string(self, len):
+        char_set = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F', 'G']
+        list = []
+        for i in range(0, len):
+            list.append(random.choice(char_set))
+        return "".join(list)
+
+    def do_udf_request(self, url_path, process_para):
         file_name = self.get_local_file(url_path)
         if not os.path.exists(file_name):
             self.complete_request(404, 'NoSuchKey', 'The specified key does not exist.')
@@ -59,12 +73,20 @@ class MyHTTPRequestHandler(BaseHTTPRequestHandler):
         req['filesize'] = os.path.getsize(file_name)
         req['object'] = 'udf'
         req['owner'] = 'TestUser'
-        req['reqId'] = '58BE9577774ABF8C0E000003'
+        req['reqId'] = self.random_string(24)
         req['reqParams'] = ''
         req['resUrl'] = 'http://' + self.headers['Host'] + url_path
         req['udfName'] = udf_name
         req['udfParam'] = udf_para
         req['version'] = '1.0'
+
+        if self.headers.has_key('Range'):
+            req_params = {}
+            req_params['range'] = self.headers['Range']
+            req['reqParams'] = json.dumps(req_params)
+        else:
+            req['reqParams'] = '{}'
+
         
         global udf_map
         if not udf_map.has_key(udf_name):
@@ -76,7 +98,7 @@ class MyHTTPRequestHandler(BaseHTTPRequestHandler):
             return
 
         req_body = json.dumps(req)
-        print req_body
+        logging.info('udf req: %s' % (req_body))
         headers = {}
         try:
             conn = httplib.HTTPConnection('%s:9000' % (udf_map[udf_name]['ip']))
@@ -131,10 +153,28 @@ class MyHTTPRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(xml)
 
+    def parse_range(self, range_str, file_size):
+        #bytes=100-300
+        #bytes=100-
+        #bytes=-300
+        if not range_str.startswith('bytes='):
+            return False, 0, file_size
+
+        range = range_str[len('bytes='):len(range_str)]
+        start_str = range.split('-')[0]
+        end_str = range.split('-')[1]
+
+        if start_str == '' and end_str == '' and len(range.split('-')) != 2:
+            return True, 0, file_size - 1
+        elif start_str == '':
+            return True, file_size - int(end_str), file_size - 1
+        elif end_str == '':
+            return True, int(start_str), file_size - 1
+        else:
+            return True, int(start_str), int(end_str)
 
     def do_GET(self):
-        print 'GET'
-        print self.headers
+        logging.info('GET path: %s headers: %s' % (self.path, self.headers))
 
         if not self.check_host():
             return
@@ -150,9 +190,9 @@ class MyHTTPRequestHandler(BaseHTTPRequestHandler):
         elif self.headers.has_key('x-oss-process'):
             process_para = self.headers['x-oss-process']
 
-        # do udf
         if process_para != '':
-            self.do_udf_request(url_path, process_para.strip(), self.headers)
+            # do udf
+            self.do_udf_request(url_path, process_para.strip())
             return
     
         file_name = self.get_local_file(url_path)
@@ -161,20 +201,38 @@ class MyHTTPRequestHandler(BaseHTTPRequestHandler):
             return
 
         file_size = os.path.getsize(file_name)
-        print 'GET %s <-- %s' % (url_path, file_name)
+        valid_range = False
+        range_start = 0
+        range_end = file_size - 1
+        if self.headers.has_key('Range'):
+            try:
+                valid_range, range_start, range_end = self.parse_range(self.headers['Range'], file_size)
+            except:
+                pass
+
+        logging.info('GET' + file_name)
         with open(file_name, 'rb') as fileobj:
-            content = fileobj.read(file_size)
             self.send_response(200)
+            if valid_range:
+                self.send_header('Content-Range', 'bytes %ld-%ld/%ld' % (range_start, range_end, file_size))
+            self.send_header('Content-Length', '%ld' % (range_end + 1 - range_start))
             self.end_headers()
-            self.wfile.write(content)
+
+            fileobj.seek(range_start)
+            remaining_bytes = range_end + 1 - range_start
+            while remaining_bytes > 0:
+                read_size = remaining_bytes if remaining_bytes <= 1024 * 1024 else 1024 * 1024
+                remaining_bytes = remaining_bytes - read_size
+                content = fileobj.read(read_size)
+                self.wfile.write(content)
+                self.wfile.flush()
             return
 
         self.complete_request(500, 'InternalError', 'UnknowError')
         return
 
     def do_PUT(self):
-        print 'GET'
-        print self.headers
+        logging.info('PUT path: %s headers: %s' % (self.path, self.headers))
 
         if not self.check_para():
             return
@@ -182,15 +240,23 @@ class MyHTTPRequestHandler(BaseHTTPRequestHandler):
         parsed_result = urlparse.urlparse(self.path)
         url_path = parsed_result.path
         file_name = self.get_local_file(url_path)
-        print 'PUT %s --> %s' % (url_path, file_name)
         content_length = self.headers.getheader('Content-Length')
-        content = self.rfile.read(int(content_length))
+        remaining_bytes = int(content_length)
         if not os.path.exists('/tmp/oss_mock'):
             os.mkdir('/tmp/oss_mock')
+        logging.info('PUT ' + file_name)
         with open(file_name, 'wb') as fileobj:
-            fileobj.write(content)
-        self.send_response(200)
-        self.end_headers()
+            while remaining_bytes > 0:
+                read_size = remaining_bytes if remaining_bytes < 1024 * 1024 else 1024 * 1024
+                remaining_bytes = remaining_bytes - read_size
+                content = self.rfile.read(read_size)
+                fileobj.write(content)
+            self.send_response(200)
+            self.end_headers()
+            return
+
+        self.complete_request(500, 'InternalError', 'UnknowError')
+        return
 
 class ThreadingMixIn:
     def process_request_thread(self, request, client_address):
@@ -234,6 +300,8 @@ class UdfHealthyCheck():
                         udf_map[k]['status'] = 'fault'
                 except:
                     udf_map[k]['status'] = 'Fault'
+
+                logging.info('udf: %s status: %s' % (k, udf_map[k]['status']))
             time.sleep(10)
 
 def get_config(section, name):
@@ -258,7 +326,23 @@ def init_config():
     oss_ip = get_config('OSS', 'oss_ip').strip()
     oss_port = get_config('OSS', 'oss_port').strip()
 
+def init_logger(filename, loglevel = logging.INFO, fmt = None):
+    logger = logging.getLogger('')
+    logger.setLevel(loglevel)
+
+    if not fmt:
+        fmt = '[%(asctime)-15s] [%(levelname)s] [%(filename)s:%(lineno)d] [%(thread)d] %(message)s'
+    handler = logging.handlers.RotatingFileHandler(filename, maxBytes = 1024*1024*100, backupCount = 5)
+    formatter = logging.Formatter(fmt)
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+    logging.info('init ok')
+
 if __name__ == '__main__':
+    # init logger
+    init_logger('oss_mock.log')
+
     # init config
     init_config()
 
